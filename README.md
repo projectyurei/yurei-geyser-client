@@ -64,6 +64,7 @@ The script writes into `src/proto/` directly (including the bundled `google/prot
    YUREI_DB_URL=postgres://user:password@127.0.0.1:5432/yurei \
    YUREI_PUMPFUN_PROGRAM=6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P \
    YUREI_RAYDIUM_PROGRAM=Hvw5ZJiExampleFake11111111111111111111111111 \
+   YUREI_GEYSER_AUTH_TOKEN="Bearer YOUR_ALLNODES_TOKEN" \
    ./build/yurei-geyser-client
    ```
 3. Watch the process logs for `yurei geyser client started`, then verify new rows land in `pumpfun_trades` / `raydium_swaps`.
@@ -74,6 +75,7 @@ Important environment variables:
 - `YUREI_PUMPFUN_PROGRAM` / `YUREI_RAYDIUM_PROGRAM` — base58 program ids that should be detected.
 - `YUREI_RESUME_FROM_SLOT` — optional, instructs the subscription to replay from a slot.
 - `YUREI_QUEUE_CAPACITY` — overrides the bounded queue length (default 65536).
+- `YUREI_GEYSER_AUTH_TOKEN` — **required for production endpoints.** PublicNode/Allnodes issue free Yellowstone credentials; log in to [Allnodes](https://www.allnodes.com/) → *PublicNode* → *Get token* and paste the provided value (usually `Bearer <token>`).
 
 Run the binary under a supervisor (systemd, Docker, etc.) for 24/7 uptime; the geyser client auto-reconnects with exponential backoff.
 
