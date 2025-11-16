@@ -223,7 +223,7 @@ static bool run_subscription(struct geyser_client *client) {
     grpc_slice method = grpc_slice_from_static_string("/geyser.Geyser/Subscribe");
     grpc_slice host = grpc_slice_from_copied_string(client->config.authority);
     gpr_timespec deadline = gpr_inf_future(GPR_CLOCK_REALTIME);
-    grpc_call *call = grpc_channel_create_call(channel, NULL, GRPC_PROPAGATE_DEFAULTS, cq, &method, &host, deadline, NULL);
+    grpc_call *call = grpc_channel_create_call(channel, NULL, GRPC_PROPAGATE_DEFAULTS, cq, method, &host, deadline, NULL);
     grpc_slice_unref(host);
     grpc_slice_unref(method);
 
