@@ -12,6 +12,7 @@
 #define YUREI_ENDPOINT_MAX 256
 #define YUREI_AUTHORITY_MAX 128
 #define YUREI_DB_URL_MAX 512
+#define YUREI_AUTH_TOKEN_MAX 512
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,6 +22,7 @@ typedef struct {
     char endpoint[YUREI_ENDPOINT_MAX];
     char authority[YUREI_AUTHORITY_MAX];
     char db_url[YUREI_DB_URL_MAX];
+    char auth_token[YUREI_AUTH_TOKEN_MAX];
     uint8_t pumpfun_program[32];
     uint8_t raydium_program[32];
     bool pumpfun_enabled;

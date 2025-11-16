@@ -15,6 +15,7 @@
 #include <grpc/grpc.h>
 #include <grpc/grpc_security.h>
 #include <grpc/support/time.h>
+#include <grpc/slice.h>
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -46,6 +47,83 @@ static void destroy_completion_queue(grpc_completion_queue *cq) {
             break;
     }
     grpc_completion_queue_destroy(cq);
+}
+
+#define CQ_CACHE_MAX_EVENTS 4
+
+static bool slice_contains_string(grpc_slice slice, const char *needle) {
+    if (!needle || !*needle)
+        return false;
+    size_t hay_len = GRPC_SLICE_LENGTH(slice);
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0 || hay_len < needle_len)
+        return false;
+    const uint8_t *hay = GRPC_SLICE_START_PTR(slice);
+    for (size_t i = 0; i <= hay_len - needle_len; ++i) {
+        if (memcmp(hay + i, needle, needle_len) == 0)
+            return true;
+    }
+    return false;
+}
+
+struct cq_event_cache_entry {
+    bool used;
+    grpc_event event;
+};
+
+typedef struct {
+    struct cq_event_cache_entry entries[CQ_CACHE_MAX_EVENTS];
+} cq_event_cache_t;
+
+static bool cq_cache_take(cq_event_cache_t *cache, void *tag, grpc_event *out) {
+    if (!cache)
+        return false;
+    for (size_t i = 0; i < CQ_CACHE_MAX_EVENTS; ++i) {
+        if (cache->entries[i].used && cache->entries[i].event.tag == tag) {
+            if (out)
+                *out = cache->entries[i].event;
+            cache->entries[i].used = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void cq_cache_store(cq_event_cache_t *cache, grpc_event ev) {
+    if (!cache)
+        return;
+    for (size_t i = 0; i < CQ_CACHE_MAX_EVENTS; ++i) {
+        if (!cache->entries[i].used) {
+            cache->entries[i].used = true;
+            cache->entries[i].event = ev;
+            return;
+        }
+    }
+    LOG_WARN("completion queue cache overflow, dropping tag %p", ev.tag);
+}
+
+static bool cq_wait_for_tag(grpc_completion_queue *cq,
+                            void *tag,
+                            cq_event_cache_t *cache,
+                            grpc_event *out) {
+    if (cq_cache_take(cache, tag, out))
+        return true;
+    while (true) {
+        grpc_event ev = grpc_completion_queue_next(cq, gpr_inf_future(GPR_CLOCK_REALTIME), NULL);
+        if (ev.type == GRPC_QUEUE_SHUTDOWN) {
+            if (out)
+                *out = ev;
+            return false;
+        }
+        if (ev.type == GRPC_QUEUE_TIMEOUT)
+            continue;
+        if (ev.tag == tag) {
+            if (out)
+                *out = ev;
+            return true;
+        }
+        cq_cache_store(cache, ev);
+    }
 }
 
 static bool decode_program_data_line(const char *line, uint8_t *buffer, size_t buf_len, size_t *written) {
@@ -218,7 +296,16 @@ static grpc_byte_buffer *build_subscribe_payload(const struct geyser_client *cli
 static bool run_subscription(struct geyser_client *client) {
     grpc_channel_credentials *creds = grpc_ssl_credentials_create(NULL, NULL, NULL, NULL);
     grpc_channel *channel = grpc_channel_create(client->config.endpoint, creds, NULL);
-    grpc_completion_queue *cq = grpc_completion_queue_create_for_pluck(NULL);
+    grpc_completion_queue *cq = grpc_completion_queue_create_for_next(NULL);
+    cq_event_cache_t event_cache = {0};
+
+    grpc_metadata initial_metadata[1];
+    size_t initial_metadata_count = 0;
+    if (client->config.auth_token[0] != '\0') {
+        initial_metadata[initial_metadata_count].key = grpc_slice_from_static_string("authorization");
+        initial_metadata[initial_metadata_count].value = grpc_slice_from_static_string(client->config.auth_token);
+        initial_metadata_count++;
+    }
 
     grpc_slice method = grpc_slice_from_static_string("/geyser.Geyser/Subscribe");
     grpc_slice host = grpc_slice_from_copied_string(client->config.authority);
@@ -247,7 +334,9 @@ static bool run_subscription(struct geyser_client *client) {
     size_t nops = 0;
 
     ops[nops].op = GRPC_OP_SEND_INITIAL_METADATA;
-    ops[nops].data.send_initial_metadata.count = 0;
+    ops[nops].data.send_initial_metadata.count = initial_metadata_count;
+    ops[nops].data.send_initial_metadata.metadata = initial_metadata_count ? initial_metadata : NULL;
+    ops[nops].data.send_initial_metadata.maybe_compression_level.is_set = 0;
     ops[nops].flags = 0;
     ops[nops].reserved = NULL;
     nops++;
@@ -291,8 +380,8 @@ static bool run_subscription(struct geyser_client *client) {
     grpc_call_start_batch(call, &status_op, 1, (void *)2, NULL);
 
     bool handshake_ok = false;
-    grpc_event ev = grpc_completion_queue_pluck(cq, (void *)1, gpr_inf_future(GPR_CLOCK_REALTIME), NULL);
-    if (!ev.success) {
+    grpc_event ev;
+    if (!cq_wait_for_tag(cq, (void *)1, &event_cache, &ev) || !ev.success) {
         LOG_ERROR("failed to establish subscription");
         grpc_byte_buffer_destroy(payload);
         goto cleanup;
@@ -309,8 +398,7 @@ static bool run_subscription(struct geyser_client *client) {
         recv_op.reserved = NULL;
         if (grpc_call_start_batch(call, &recv_op, 1, (void *)3, NULL) != GRPC_CALL_OK)
             break;
-        ev = grpc_completion_queue_pluck(cq, (void *)3, gpr_inf_future(GPR_CLOCK_REALTIME), NULL);
-        if (!ev.success || recv_buffer == NULL)
+        if (!cq_wait_for_tag(cq, (void *)3, &event_cache, &ev) || !ev.success || recv_buffer == NULL)
             break;
         grpc_byte_buffer_reader reader;
         grpc_byte_buffer_reader_init(&reader, recv_buffer);
@@ -329,11 +417,28 @@ static bool run_subscription(struct geyser_client *client) {
         geyser__subscribe_update__free_unpacked(update, NULL);
     }
 
-    ev = grpc_completion_queue_pluck(cq, (void *)2, gpr_inf_future(GPR_CLOCK_REALTIME), NULL);
-    if (ev.success) {
-        LOG_INFO("subscription closed with status %d", status_code);
+    bool status_received = false;
+    if (cq_wait_for_tag(cq, (void *)2, &event_cache, &ev) && ev.success) {
+        status_received = true;
+        size_t detail_len = GRPC_SLICE_LENGTH(status_details);
+        if (detail_len > 0) {
+            LOG_INFO("subscription closed with status %d (%.*s)",
+                     status_code,
+                     (int)detail_len,
+                     (const char *)GRPC_SLICE_START_PTR(status_details));
+        } else {
+            LOG_INFO("subscription closed with status %d", status_code);
+        }
     } else {
         LOG_WARN("subscription ended without status");
+    }
+
+    if (status_received && client->config.from_slot_set &&
+        slice_contains_string(status_details, "from_slot is not supported")) {
+        LOG_WARN("endpoint rejected from_slot resume; disabling replay and retrying from head");
+        client->config.from_slot_set = false;
+        client->config.from_slot = 0;
+        handshake_ok = false;
     }
 
 cleanup:

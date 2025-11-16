@@ -4,10 +4,18 @@ CREATE TABLE IF NOT EXISTS pumpfun_trades (
     tx_signature TEXT NOT NULL,
     mint TEXT NOT NULL,
     trader TEXT NOT NULL,
+    creator TEXT NOT NULL,
     side TEXT NOT NULL,
     sol_amount NUMERIC NOT NULL,
     token_amount NUMERIC NOT NULL,
-    price_lamports NUMERIC NOT NULL
+    fee_bps NUMERIC NOT NULL,
+    fee_lamports NUMERIC NOT NULL,
+    creator_fee_bps NUMERIC NOT NULL,
+    creator_fee_lamports NUMERIC NOT NULL,
+    virtual_sol_reserves NUMERIC NOT NULL,
+    virtual_token_reserves NUMERIC NOT NULL,
+    real_sol_reserves NUMERIC NOT NULL,
+    real_token_reserves NUMERIC NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS raydium_swaps (
@@ -15,7 +23,7 @@ CREATE TABLE IF NOT EXISTS raydium_swaps (
     slot BIGINT NOT NULL,
     tx_signature TEXT NOT NULL,
     pool TEXT NOT NULL,
-    base_amount NUMERIC NOT NULL,
-    quote_amount NUMERIC NOT NULL,
-    direction TEXT NOT NULL
+    user_owner TEXT NOT NULL,
+    amount_in NUMERIC NOT NULL,
+    amount_out NUMERIC NOT NULL
 );

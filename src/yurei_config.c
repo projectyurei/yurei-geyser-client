@@ -11,15 +11,15 @@
 #include <string.h>
 
 static void copy_env(const char *name, char *dest, size_t dest_len, const char *fallback) {
+    if (!dest || dest_len == 0)
+        return;
     const char *value = getenv(name);
-    if (!value || !*value) {
-        if (fallback)
-            strncpy(dest, fallback, dest_len - 1);
-        else
-            dest[0] = '\0';
+    const char *source = (value && *value) ? value : fallback;
+    if (!source) {
+        dest[0] = '\0';
         return;
     }
-    strncpy(dest, value, dest_len - 1);
+    strncpy(dest, source, dest_len - 1);
     dest[dest_len - 1] = '\0';
 }
 
@@ -30,6 +30,7 @@ bool yurei_config_load(yurei_config_t *config) {
     copy_env("YUREI_GEYSER_ENDPOINT", config->endpoint, sizeof(config->endpoint), "solana-yellowstone-grpc.publicnode.com:443");
     copy_env("YUREI_GEYSER_AUTHORITY", config->authority, sizeof(config->authority), "solana-yellowstone-grpc.publicnode.com");
     copy_env("YUREI_DB_URL", config->db_url, sizeof(config->db_url), "postgres://postgres:postgres@127.0.0.1:5432/yurei");
+    copy_env("YUREI_GEYSER_AUTH_TOKEN", config->auth_token, sizeof(config->auth_token), "");
 
     const char *pumpfun = getenv("YUREI_PUMPFUN_PROGRAM");
     if (pumpfun && *pumpfun) {
