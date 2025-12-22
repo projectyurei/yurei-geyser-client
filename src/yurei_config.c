@@ -27,8 +27,14 @@ bool yurei_config_load(yurei_config_t *config) {
     if (!config)
         return false;
     memset(config, 0, sizeof(*config));
-    copy_env("YUREI_GEYSER_ENDPOINT", config->endpoint, sizeof(config->endpoint), "solana-yellowstone-grpc.publicnode.com:443");
-    copy_env("YUREI_GEYSER_AUTHORITY", config->authority, sizeof(config->authority), "solana-yellowstone-grpc.publicnode.com");
+    // Geyser gRPC Endpoint Configuration
+    // Primary: Helius LaserStream (Yellowstone gRPC compatible, requires API key)
+    //   - US East: laserstream-mainnet-ewr.helius-rpc.com
+    //   - Europe:  laserstream-mainnet-fra.helius-rpc.com
+    //   - Asia:    laserstream-mainnet-tyo.helius-rpc.com
+    // Fallback: PublicNode (free, public): solana-yellowstone-grpc.publicnode.com:443
+    copy_env("YUREI_GEYSER_ENDPOINT", config->endpoint, sizeof(config->endpoint), "laserstream-mainnet-ewr.helius-rpc.com:443");
+    copy_env("YUREI_GEYSER_AUTHORITY", config->authority, sizeof(config->authority), "laserstream-mainnet-ewr.helius-rpc.com");
     copy_env("YUREI_DB_URL", config->db_url, sizeof(config->db_url), "postgres://postgres:postgres@127.0.0.1:5432/yurei");
     copy_env("YUREI_GEYSER_AUTH_TOKEN", config->auth_token, sizeof(config->auth_token), "");
 

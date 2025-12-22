@@ -3,6 +3,7 @@
 // https://x.com/yureiai
 
 #include "event_queue.h"
+#include "metrics.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -58,6 +59,11 @@ bool event_queue_push(yurei_event_queue_t *queue, const yurei_event_t *event) {
     queue->buffer[queue->tail] = *event;
     queue->tail = (queue->tail + 1) % queue->capacity;
     queue->size++;
+    
+    // Update metrics
+    metrics_inc_queue_push();
+    metrics_update_queue_high_water(queue->size);
+    
     pthread_cond_signal(&queue->not_empty);
     pthread_mutex_unlock(&queue->lock);
     return true;
@@ -79,6 +85,10 @@ bool event_queue_pop(yurei_event_queue_t *queue, yurei_event_t *event, bool bloc
     *event = queue->buffer[queue->head];
     queue->head = (queue->head + 1) % queue->capacity;
     queue->size--;
+    
+    // Update metrics
+    metrics_inc_queue_pop();
+    
     pthread_cond_signal(&queue->not_full);
     pthread_mutex_unlock(&queue->lock);
     return true;
@@ -91,3 +101,15 @@ void event_queue_close(yurei_event_queue_t *queue) {
     pthread_cond_broadcast(&queue->not_full);
     pthread_mutex_unlock(&queue->lock);
 }
+
+size_t event_queue_size(yurei_event_queue_t *queue) {
+    pthread_mutex_lock(&queue->lock);
+    size_t sz = queue->size;
+    pthread_mutex_unlock(&queue->lock);
+    return sz;
+}
+
+size_t event_queue_capacity(yurei_event_queue_t *queue) {
+    return queue->capacity;
+}
+
