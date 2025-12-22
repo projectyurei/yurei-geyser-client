@@ -2,17 +2,25 @@
 // Copyright 2025 Project Yurei. All rights reserved.
 // https://x.com/yureiai
 
+#define _DEFAULT_SOURCE  // Enable usleep on glibc
+
 #include "db_writer.h"
 
 #include "base58.h"
 #include "log.h"
+#include "metrics.h"
 
 #include <libpq-fe.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
+
+// Batch configuration
+#define BATCH_SIZE 100          // Max events per batch
+#define FLUSH_INTERVAL_MS 50    // Max delay before flush (milliseconds)
 
 struct db_writer {
     yurei_event_queue_t *queue;
@@ -20,11 +28,22 @@ struct db_writer {
     PGconn *conn;
     pthread_t thread;
     bool running;
+    
+    // Batch buffers
+    yurei_event_t pumpfun_batch[BATCH_SIZE];
+    size_t pumpfun_count;
+    yurei_event_t raydium_batch[BATCH_SIZE];
+    size_t raydium_count;
+    struct timeval last_flush;
 };
 
 static bool ensure_connection(struct db_writer *writer) {
     if (!writer->conn) {
         writer->conn = PQconnectdb(writer->config->db_url);
+        if (PQstatus(writer->conn) == CONNECTION_OK) {
+            metrics_inc_db_reconnect();
+            LOG_INFO("Database connection established");
+        }
     }
     if (PQstatus(writer->conn) != CONNECTION_OK) {
         LOG_ERROR("libpq: %s", PQerrorMessage(writer->conn));
@@ -35,143 +54,211 @@ static bool ensure_connection(struct db_writer *writer) {
     return true;
 }
 
-static bool insert_pumpfun(struct db_writer *writer, const yurei_event_t *event) {
-    if (!ensure_connection(writer))
-        return false;
-    char mint_b58[64];
-    char trader_b58[64];
-    char creator_b58[64];
-    char slot_buf[32];
-    if (base58_encode(event->data.pumpfun_trade.mint, 32, mint_b58, sizeof(mint_b58)) < 0 ||
-        base58_encode(event->data.pumpfun_trade.trader, 32, trader_b58, sizeof(trader_b58)) < 0 ||
-        base58_encode(event->data.pumpfun_trade.creator, 32, creator_b58, sizeof(creator_b58)) < 0) {
-        LOG_ERROR("base58 encode failed for PumpFun event");
-        return false;
+static uint64_t get_time_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+// Flush PumpFun batch using multi-row INSERT
+static bool flush_pumpfun_batch(struct db_writer *writer) {
+    if (writer->pumpfun_count == 0) return true;
+    if (!ensure_connection(writer)) return false;
+
+    uint64_t start_time = get_time_ms();
+    
+    // Build multi-row INSERT statement
+    // Estimated max size: header + (count * row_size)
+    size_t buf_size = 512 + writer->pumpfun_count * 600;
+    char *query = malloc(buf_size);
+    if (!query) return false;
+    
+    strcpy(query, "INSERT INTO pumpfun_trades (slot, tx_signature, mint, trader, creator, side, "
+                  "sol_amount, token_amount, fee_bps, fee_lamports, creator_fee_bps, creator_fee_lamports, "
+                  "virtual_sol_reserves, virtual_token_reserves, real_sol_reserves, real_token_reserves) VALUES ");
+    
+    size_t offset = strlen(query);
+    
+    for (size_t i = 0; i < writer->pumpfun_count; i++) {
+        const yurei_event_t *event = &writer->pumpfun_batch[i];
+        
+        char mint_b58[64], trader_b58[64], creator_b58[64];
+        if (base58_encode(event->data.pumpfun_trade.mint, 32, mint_b58, sizeof(mint_b58)) < 0 ||
+            base58_encode(event->data.pumpfun_trade.trader, 32, trader_b58, sizeof(trader_b58)) < 0 ||
+            base58_encode(event->data.pumpfun_trade.creator, 32, creator_b58, sizeof(creator_b58)) < 0) {
+            continue;
+        }
+        
+        if (i > 0) {
+            offset += snprintf(query + offset, buf_size - offset, ",");
+        }
+        
+        offset += snprintf(query + offset, buf_size - offset,
+            "(%lu,'%s','%s','%s','%s','%s',%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu)",
+            event->data.pumpfun_trade.slot,
+            event->signature,
+            mint_b58, trader_b58, creator_b58,
+            event->data.pumpfun_trade.is_buy ? "BUY" : "SELL",
+            event->data.pumpfun_trade.sol_amount,
+            event->data.pumpfun_trade.token_amount,
+            event->data.pumpfun_trade.fee_basis_points,
+            event->data.pumpfun_trade.fee_lamports,
+            event->data.pumpfun_trade.creator_fee_basis_points,
+            event->data.pumpfun_trade.creator_fee_lamports,
+            event->data.pumpfun_trade.virtual_sol_reserves,
+            event->data.pumpfun_trade.virtual_token_reserves,
+            event->data.pumpfun_trade.real_sol_reserves,
+            event->data.pumpfun_trade.real_token_reserves);
     }
-
-    char sol_amount[32];
-    char token_amount[32];
-    char fee_bps[32];
-    char fee_amount[32];
-    char creator_fee_bps[32];
-    char creator_fee_amount[32];
-    char virtual_sol[32];
-    char virtual_token[32];
-    char real_sol[32];
-    char real_token[32];
-    snprintf(slot_buf, sizeof(slot_buf), "%lu", event->data.pumpfun_trade.slot);
-    snprintf(sol_amount, sizeof(sol_amount), "%lu", event->data.pumpfun_trade.sol_amount);
-    snprintf(token_amount, sizeof(token_amount), "%lu", event->data.pumpfun_trade.token_amount);
-    snprintf(fee_bps, sizeof(fee_bps), "%lu", event->data.pumpfun_trade.fee_basis_points);
-    snprintf(fee_amount, sizeof(fee_amount), "%lu", event->data.pumpfun_trade.fee_lamports);
-    snprintf(creator_fee_bps, sizeof(creator_fee_bps), "%lu", event->data.pumpfun_trade.creator_fee_basis_points);
-    snprintf(creator_fee_amount, sizeof(creator_fee_amount), "%lu", event->data.pumpfun_trade.creator_fee_lamports);
-    snprintf(virtual_sol, sizeof(virtual_sol), "%lu", event->data.pumpfun_trade.virtual_sol_reserves);
-    snprintf(virtual_token, sizeof(virtual_token), "%lu", event->data.pumpfun_trade.virtual_token_reserves);
-    snprintf(real_sol, sizeof(real_sol), "%lu", event->data.pumpfun_trade.real_sol_reserves);
-    snprintf(real_token, sizeof(real_token), "%lu", event->data.pumpfun_trade.real_token_reserves);
-
-    const char *params[] = {
-        slot_buf,
-        event->signature,
-        mint_b58,
-        trader_b58,
-        creator_b58,
-        event->data.pumpfun_trade.is_buy ? "BUY" : "SELL",
-        sol_amount,
-        token_amount,
-        fee_bps,
-        fee_amount,
-        creator_fee_bps,
-        creator_fee_amount,
-        virtual_sol,
-        virtual_token,
-        real_sol,
-        real_token
-    };
-    PGresult *res = PQexecParams(
-        writer->conn,
-        "INSERT INTO pumpfun_trades (slot, tx_signature, mint, trader, creator, side, sol_amount, token_amount, fee_bps, fee_lamports, creator_fee_bps, creator_fee_lamports, virtual_sol_reserves, virtual_token_reserves, real_sol_reserves, real_token_reserves)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
-        (int)(sizeof(params) / sizeof(params[0])),
-        NULL,
-        params,
-        NULL,
-        NULL,
-        0);
+    
+    PGresult *res = PQexec(writer->conn, query);
+    free(query);
+    
+    uint64_t latency = get_time_ms() - start_time;
+    metrics_add_db_latency(latency * 1000);  // Convert to microseconds
+    
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        LOG_ERROR("pumpfun insert failed: %s", PQerrorMessage(writer->conn));
+        LOG_ERROR("pumpfun batch insert failed: %s", PQerrorMessage(writer->conn));
         PQclear(res);
+        metrics_inc_db_failed();
         return false;
     }
+    
     PQclear(res);
+    
+    for (size_t i = 0; i < writer->pumpfun_count; i++) {
+        metrics_inc_db_success();
+        metrics_inc_pumpfun();
+    }
+    metrics_inc_db_batch();
+    
+    LOG_DEBUG("Flushed %zu PumpFun events in %lu ms", writer->pumpfun_count, latency);
+    writer->pumpfun_count = 0;
     return true;
 }
 
-static bool insert_raydium(struct db_writer *writer, const yurei_event_t *event) {
-    if (!ensure_connection(writer))
-        return false;
-    char amm_b58[64];
-    char owner_b58[64];
-    char slot_buf[32];
-    if (base58_encode(event->data.raydium_swap.amm, 32, amm_b58, sizeof(amm_b58)) < 0 ||
-        base58_encode(event->data.raydium_swap.user_source_owner, 32, owner_b58, sizeof(owner_b58)) < 0) {
-        LOG_ERROR("base58 encode failed for Raydium event");
-        return false;
+// Flush Raydium batch using multi-row INSERT
+static bool flush_raydium_batch(struct db_writer *writer) {
+    if (writer->raydium_count == 0) return true;
+    if (!ensure_connection(writer)) return false;
+
+    uint64_t start_time = get_time_ms();
+    
+    size_t buf_size = 256 + writer->raydium_count * 300;
+    char *query = malloc(buf_size);
+    if (!query) return false;
+    
+    strcpy(query, "INSERT INTO raydium_swaps (slot, tx_signature, pool, user_owner, amount_in, amount_out) VALUES ");
+    
+    size_t offset = strlen(query);
+    
+    for (size_t i = 0; i < writer->raydium_count; i++) {
+        const yurei_event_t *event = &writer->raydium_batch[i];
+        
+        char amm_b58[64], owner_b58[64];
+        if (base58_encode(event->data.raydium_swap.amm, 32, amm_b58, sizeof(amm_b58)) < 0 ||
+            base58_encode(event->data.raydium_swap.user_source_owner, 32, owner_b58, sizeof(owner_b58)) < 0) {
+            continue;
+        }
+        
+        if (i > 0) {
+            offset += snprintf(query + offset, buf_size - offset, ",");
+        }
+        
+        offset += snprintf(query + offset, buf_size - offset,
+            "(%lu,'%s','%s','%s',%lu,%lu)",
+            event->data.raydium_swap.slot,
+            event->signature,
+            amm_b58, owner_b58,
+            event->data.raydium_swap.amount_in,
+            event->data.raydium_swap.amount_out);
     }
-
-    char amount_in[32];
-    char amount_out[32];
-    snprintf(slot_buf, sizeof(slot_buf), "%lu", event->data.raydium_swap.slot);
-    snprintf(amount_in, sizeof(amount_in), "%lu", event->data.raydium_swap.amount_in);
-    snprintf(amount_out, sizeof(amount_out), "%lu", event->data.raydium_swap.amount_out);
-
-    const char *params[] = {
-        slot_buf,
-        event->signature,
-        amm_b58,
-        owner_b58,
-        amount_in,
-        amount_out
-    };
-    PGresult *res = PQexecParams(
-        writer->conn,
-        "INSERT INTO raydium_swaps (slot, tx_signature, pool, user_owner, amount_in, amount_out) VALUES ($1,$2,$3,$4,$5,$6)",
-        6,
-        NULL,
-        params,
-        NULL,
-        NULL,
-        0);
+    
+    PGresult *res = PQexec(writer->conn, query);
+    free(query);
+    
+    uint64_t latency = get_time_ms() - start_time;
+    metrics_add_db_latency(latency * 1000);
+    
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        LOG_ERROR("raydium insert failed: %s", PQerrorMessage(writer->conn));
+        LOG_ERROR("raydium batch insert failed: %s", PQerrorMessage(writer->conn));
         PQclear(res);
+        metrics_inc_db_failed();
         return false;
     }
+    
     PQclear(res);
+    
+    for (size_t i = 0; i < writer->raydium_count; i++) {
+        metrics_inc_db_success();
+        metrics_inc_raydium();
+    }
+    metrics_inc_db_batch();
+    
+    LOG_DEBUG("Flushed %zu Raydium events in %lu ms", writer->raydium_count, latency);
+    writer->raydium_count = 0;
     return true;
+}
+
+static void flush_all_batches(struct db_writer *writer) {
+    flush_pumpfun_batch(writer);
+    flush_raydium_batch(writer);
+    gettimeofday(&writer->last_flush, NULL);
+}
+
+static bool should_flush_timer(struct db_writer *writer) {
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    uint64_t elapsed_ms = (now.tv_sec - writer->last_flush.tv_sec) * 1000 +
+                          (now.tv_usec - writer->last_flush.tv_usec) / 1000;
+    return elapsed_ms >= FLUSH_INTERVAL_MS;
 }
 
 static void *db_writer_main(void *arg) {
     struct db_writer *writer = arg;
+    gettimeofday(&writer->last_flush, NULL);
+    
     while (writer->running) {
         yurei_event_t event;
-        if (!event_queue_pop(writer->queue, &event, true)) {
-            if (!writer->running)
-                break;
+        
+        // Non-blocking pop to allow timer-based flushing
+        if (!event_queue_pop(writer->queue, &event, false)) {
+            // No event available - check flush timer
+            if (should_flush_timer(writer)) {
+                flush_all_batches(writer);
+            }
+            usleep(1000);  // 1ms sleep to avoid busy-wait
             continue;
         }
+        
+        metrics_inc_events_total();
+        
         switch (event.type) {
         case YUREI_EVENT_PUMPFUN_TRADE:
-            insert_pumpfun(writer, &event);
+            writer->pumpfun_batch[writer->pumpfun_count++] = event;
+            if (writer->pumpfun_count >= BATCH_SIZE) {
+                flush_pumpfun_batch(writer);
+            }
             break;
         case YUREI_EVENT_RAYDIUM_SWAP:
-            insert_raydium(writer, &event);
+            writer->raydium_batch[writer->raydium_count++] = event;
+            if (writer->raydium_count >= BATCH_SIZE) {
+                flush_raydium_batch(writer);
+            }
             break;
         default:
             break;
         }
+        
+        // Timer-based flush for low-volume periods
+        if (should_flush_timer(writer)) {
+            flush_all_batches(writer);
+        }
     }
+    
+    // Final flush on shutdown
+    flush_all_batches(writer);
+    
     if (writer->conn) {
         PQfinish(writer->conn);
         writer->conn = NULL;
@@ -188,10 +275,15 @@ db_writer_t *db_writer_start(const db_writer_params_t *params) {
     writer->queue = params->queue;
     writer->config = params->config;
     writer->running = true;
+    writer->pumpfun_count = 0;
+    writer->raydium_count = 0;
+    
     if (pthread_create(&writer->thread, NULL, db_writer_main, writer) != 0) {
         free(writer);
         return NULL;
     }
+    
+    LOG_INFO("DB writer started (batch_size=%d, flush_interval=%dms)", BATCH_SIZE, FLUSH_INTERVAL_MS);
     return writer;
 }
 
@@ -202,4 +294,6 @@ void db_writer_stop(db_writer_t *writer) {
     event_queue_close(writer->queue);
     pthread_join(writer->thread, NULL);
     free(writer);
+    LOG_INFO("DB writer stopped");
 }
+
