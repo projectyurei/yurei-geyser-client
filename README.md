@@ -57,25 +57,39 @@ scripts/generate_protos.sh
 The script writes into `src/proto/` directly (including the bundled `google/protobuf/timestamp.pb-c.*` files).
 
 ## Running
-1. Provision PostgreSQL (or point to an existing instance) and apply the schema below.
-2. Export the runtime configuration and start the binary:
+
+> **Geyser gRPC Endpoints:**
+> - **Helius LaserStream** (primary, Yellowstone-compatible, requires [API key](https://dashboard.helius.dev))
+>   - US East: `laserstream-mainnet-ewr.helius-rpc.com`
+>   - Europe: `laserstream-mainnet-fra.helius-rpc.com`
+>   - Asia: `laserstream-mainnet-tyo.helius-rpc.com`
+> - **PublicNode** (fallback, free): `solana-yellowstone-grpc.publicnode.com:443`
+
+1. Get your Helius API key from [Helius Dashboard](https://dashboard.helius.dev/)
+2. Provision PostgreSQL and apply the schema below.
+3. Export the runtime configuration and start the binary:
    ```bash
-   YUREI_GEYSER_ENDPOINT=solana-yellowstone-grpc.publicnode.com:443 \
+   # Helius LaserStream (recommended)
+   YUREI_GEYSER_AUTH_TOKEN="YOUR_HELIUS_API_KEY" \
    YUREI_DB_URL=postgres://user:password@127.0.0.1:5432/yurei \
    YUREI_PUMPFUN_PROGRAM=6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P \
-   YUREI_RAYDIUM_PROGRAM=Hvw5ZJiExampleFake11111111111111111111111111 \
-   YUREI_GEYSER_AUTH_TOKEN="Bearer YOUR_ALLNODES_TOKEN" \
+   YUREI_RAYDIUM_PROGRAM=675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 \
    ./build/yurei-geyser-client
+
+   # PublicNode fallback (free)
+   # YUREI_GEYSER_ENDPOINT=solana-yellowstone-grpc.publicnode.com:443 \
+   # YUREI_GEYSER_AUTHORITY=solana-yellowstone-grpc.publicnode.com \
+   # YUREI_GEYSER_AUTH_TOKEN="Bearer YOUR_ALLNODES_TOKEN" \
    ```
-3. Watch the process logs for `yurei geyser client started`, then verify new rows land in `pumpfun_trades` / `raydium_swaps`.
+4. Watch logs for `yurei geyser client started`.
 
 Important environment variables:
-- `YUREI_GEYSER_ENDPOINT` — Yellowstone gRPC endpoint (default: `solana-yellowstone-grpc.publicnode.com:443`).
+- `YUREI_GEYSER_ENDPOINT` — Geyser gRPC endpoint (default: `laserstream-mainnet-ewr.helius-rpc.com:443`).
+- `YUREI_GEYSER_AUTH_TOKEN` — Helius API key or PublicNode Bearer token.
 - `YUREI_DB_URL` — PostgreSQL connection string.
-- `YUREI_PUMPFUN_PROGRAM` / `YUREI_RAYDIUM_PROGRAM` — base58 program ids that should be detected.
-- `YUREI_RESUME_FROM_SLOT` — optional, instructs the subscription to replay from a slot.
-- `YUREI_QUEUE_CAPACITY` — overrides the bounded queue length (default 65536).
-- `YUREI_GEYSER_AUTH_TOKEN` — **required for production endpoints.** PublicNode/Allnodes issue free Yellowstone credentials; log in to [Allnodes](https://www.allnodes.com/) → *PublicNode* → *Get token* and paste the provided value (usually `Bearer <token>`).
+- `YUREI_PUMPFUN_PROGRAM` / `YUREI_RAYDIUM_PROGRAM` — base58 program ids.
+- `YUREI_RESUME_FROM_SLOT` — replay from slot.
+- `YUREI_QUEUE_CAPACITY` — queue size (default 65536).
 
 Run the binary under a supervisor (systemd, Docker, etc.) for 24/7 uptime; the geyser client auto-reconnects with exponential backoff.
 
