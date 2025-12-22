@@ -21,6 +21,8 @@ void event_queue_destroy(yurei_event_queue_t *queue);
 bool event_queue_push(yurei_event_queue_t *queue, const yurei_event_t *event);
 bool event_queue_pop(yurei_event_queue_t *queue, yurei_event_t *event, bool block);
 void event_queue_close(yurei_event_queue_t *queue);
+size_t event_queue_size(yurei_event_queue_t *queue);
+size_t event_queue_capacity(yurei_event_queue_t *queue);
 
 #ifdef __cplusplus
 }

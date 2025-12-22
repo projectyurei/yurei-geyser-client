@@ -27,6 +27,7 @@ set(SRC_FILES
   src/event_queue.c
   src/geyser_client.c
   src/log.c
+  src/metrics.c
   src/pumpfun_parser.c
   src/protocol_detector.c
   src/raydium_parser.c
@@ -42,7 +43,16 @@ target_include_directories(yurei_objs
     ${PROTO_GEN_DIR}
 )
 
+# Compiler warnings and optimizations
 target_compile_options(yurei_objs PRIVATE -Wall -Wextra -Wpedantic -Werror=vla)
+
+# Release build optimizations
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  target_compile_options(yurei_objs PRIVATE -O3 -flto)
+  if(NOT APPLE)
+    target_compile_options(yurei_objs PRIVATE -march=native)
+  endif()
+endif()
 
 find_package(OpenSSL)
 if(OPENSSL_FOUND)
